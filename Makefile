@@ -44,7 +44,7 @@ kernel_cscope:
 kernel_clean:
 	make -C linux clean
 
-kernel: kernel_bzImage
+kernel: driver initramfs kernel_bzImage
 
 #### Driver
 DRIVER=driver
