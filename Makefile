@@ -52,6 +52,7 @@ driver: initramfs/
 	echo "obj-m += $(DRIVER).o" > driver/Makefile
 	make -C linux M=$(PWD)/driver modules
 	cp driver/$(DRIVER).ko initramfs/
+	@$(MAKE) initramfs
 
 driver_strip: driver
 	strip --strip-debug driver/$(DRIVER).ko
