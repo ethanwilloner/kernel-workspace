@@ -1,39 +1,56 @@
+SHELL := /bin/bash
 DIR=$(shell pwd)
 ARCH?=x86_64
 MAKE=make -j$(shell nproc --ignore=1)
-
-.PHONY: kernel driver busybox initramfs kernel_clean busybox_clean clean
-
+TAG=master
 install_deps:
 	sudo dnf group install "C Development Tools and Libraries"
 	sudo dnf install glibc-static kernel-devel openssl-devel elfutils-libelf-devel
 
 #### Sources
 kernel_get:
-	git clone --depth=1 https://github.com/torvalds/linux.git
+	git clone --depth=1 https://github.com/torvalds/linux.git --tag $(TAG)
+	mv $(TAG) linux
 
 linux/: kernel_get
 
-busybox_get:
+busybox-snapshot.tar.bz2:
 	wget https://busybox.net/downloads/busybox-snapshot.tar.bz2
+
+busybox_get: busybox-snapshot.tar.bz2  
 	tar xf busybox-snapshot.tar.bz2
 
 busybox/: busybox_get
 
 #### Linux Kernel
+.PHONY: kernel kernel_clean
+
 kernel_defconfig: linux/Makefile
 	make -C linux defconfig
 
 kernel_menuconfig: linux/Makefile
 	make -C linux menuconfig
 
+kernel_kallsyms_all: linux/.config
+	(cd linux && scripts/config -e KALLSYMS_ALL)
+
+kernel_kallsyms_all_clean: linux/.config
+	(cd linux && scripts/config -d KALLSYMS_ALL)
+
+kernel_randomization_disable:
+	(cd linux && scripts/config -d RANDOMIZE_BASE -d RANDOMIZE_MEMORY)
+
+kernel_randomization_disable_clean:
+	(cd linux && scripts/config -e RANDOMIZE_BASE -e RANDOMIZE_MEMORY)
+
 linux/Makefile:
 	@echo "Required: Linux kernel source in $(DIR)/linux"
 
-linux/.config: kernel_defconfig
+linux/.config: linux/Makefile
+	make -C linux defconfig
 
-kernel_bzImage: linux/.config 
-	make -C linux -j $(nproc) bzImage
+kernel_bzImage: linux/.config
+	$(MAKE) -C linux bzImage
 
 kernel_driver: linux/drivers/Makefile
 	make -C linux drivers
@@ -47,10 +64,16 @@ kernel_clean:
 kernel: driver initramfs kernel_bzImage
 
 #### Driver
+.PHONY:
 DRIVER=driver
-driver: initramfs/
+
+driver/Makefile:
 	echo "obj-m += $(DRIVER).o" > driver/Makefile
+
+driver/$(DRIVER).ko: driver/Makefile driver/$(DRIVER).c
 	make -C linux M=$(PWD)/driver modules
+
+driver: driver/$(DRIVER).ko
 	cp driver/$(DRIVER).ko initramfs/
 	@$(MAKE) initramfs
 
@@ -62,6 +85,8 @@ driver_clean:
 	rm -f driver/Makefile
 
 #### Busybox
+.PHONY: busybox busybox_clean
+
 busybox/Makefile:
 	@echo "Required: busybox source in $(DIR)/busybox"
 
@@ -77,8 +102,10 @@ busybox_clean:
 	make -C busybox clean
 
 #### Initramfs
+.PHONY: initramfs.gz
+
 initramfs/:
-	mkdir -p initramfs/
+	mkdir -p initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
 
 .ONESHELL:
 initramfs/init: initramfs/
@@ -89,21 +116,27 @@ initramfs/init: initramfs/
 	#!/bin/sh
 	busybox mount -t proc proc /proc
 	busybox mount -o remount,rw /
-	/bin/busybox --install -s
-	insmod /$(DRIVER).ko
 	echo 1 > /proc/sys/kernel/printk
+	echo 0 > /proc/sys/kernel/randomize_va_space
+	/bin/busybox --install -s
+	#insmod /$(DRIVER).ko
 	#clear
 	exec sh
 	EOF
-
-initramfs: initramfs/init main.c
-	mkdir -p initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
-	cp -u -r busybox/_install/* initramfs/
-	chmod +x initramfs/bin/busybox
 	chmod +x initramfs/init
+
+initramfs/main:
 	gcc -static -o initramfs/main main.c
+
+initramfs.gz:
 	cd initramfs
 	find . | cpio -oHnewc | gzip > ../initramfs.gz
+
+initramfs/bin/busybox:
+	cp -u -r busybox/_install/* initramfs/
+	chmod +x initramfs/bin/busybox
+
+initramfs: initramfs/init initramfs/main initramfs/bin/busybox initramfs.gz
 
 initramfs_clean:
 	rm -rf initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
@@ -114,6 +147,7 @@ initramfs_clean:
 qemurun: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
 	tmux=''
 	if [ "$$TERM" = "screen-256color" ] && [ -n "$$TMUX" ]; then
+		# TODO: -h split option
 		tmux='tmux split-window'
 	fi
 	eval $$tmux qemu-system-x86_64 \
@@ -122,12 +156,14 @@ qemurun: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
 		-nographic \
 		-kernel linux/arch/$(ARCH)/boot/bzImage \
 		-initrd initramfs.gz \
-		-append "nokaslr" \
-		-append "console=ttyS0" \
-		-serial mon:stdio
+		-serial mon:stdio \
+		-append \"console=ttyS0 quiet nokaslr nosmap nosmep mitigations=off \"
+
 
 #### Makefile standard commands
-all: kernel_get busybox_get kernel driver busybox initramfs
+.PHONY: clean
+
+all: busybox_get kernel driver busybox initramfs
 clean: kernel_clean driver_clean busybox_clean initramfs_clean
 clean_sources:
 	rm -rf busybox/ busybox-snapshot.tar.bz2 linux/
