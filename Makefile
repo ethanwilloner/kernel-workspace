@@ -31,6 +31,8 @@ busybox/: busybox-snapshot.tar.bz2
 #### Linux Kernel
 .PHONY: kernel kernel_clean
 
+linux/arch/$(ARCH)/boot/bzImage:
+
 linux/Makefile: linux/
 	@echo "Required: Linux kernel source in $(DIR)/linux"
 
@@ -61,6 +63,12 @@ kernel_debug: linux/.config
 kernel_debug_clean: linux/.config
 	(cd linux && scripts/config -d DEBUG_INFO -d GDB_SCRIPTS)
 
+kernel_kgdb: linux/.config
+	(cd linux && scripts/config -e KGDB -e KGDB_SERIAL_CONSOLE -e KGDB_KDB)
+
+kernel_kgdb_clean: linux/.config
+	(cd linux && scripts/config -d KGDB -d KGDB_SERIAL_CONSOLE -d KGDB_KDB)
+
 kernel_bzImage: linux/.config
 	$(MAKE) -C linux bzImage
 
@@ -68,7 +76,7 @@ kernel_driver: linux/drivers/Makefile
 	make -C linux drivers
 
 kernel_cscope:
-	make -C linux cscope
+	make -C linux ARCH=$(ARCH) cscope tags
 
 kernel_clean:
 	make -C linux clean
@@ -118,7 +126,7 @@ busybox_clean:
 	make -C busybox clean
 
 #### Initramfs
-.PHONY: initramfs.gz
+.PHONY:
 
 initramfs/:
 	mkdir -p initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
@@ -144,7 +152,7 @@ initramfs/init: initramfs/
 initramfs/main:
 	gcc -static -o initramfs/main main.c
 
-initramfs.gz:
+initramfs.gz: driver/$(DRIVER).ko
 	cd initramfs
 	find . | cpio -oHnewc | gzip > ../initramfs.gz
 
@@ -152,7 +160,7 @@ initramfs/bin/busybox: busybox/_install
 	cp -u -r busybox/_install/* initramfs/
 	chmod +x initramfs/bin/busybox
 
-initramfs: initramfs/init initramfs/main initramfs/bin/busybox initramfs.gz
+initramfs: initramfs/ initramfs/init initramfs/main initramfs/bin/busybox initramfs.gz
 
 initramfs_clean:
 	rm -rf initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
@@ -161,17 +169,19 @@ initramfs_clean:
 #### Qemu
 KERNEL_PARAMS=\"console=ttyS0 quiet nokaslr nosmap nosmep mitigations=off\"
 .ONESHELL:
-qemurun: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
+qemurun: initramfs.gz
 	tmux=''
-	if [ "$$TERM" = "screen-256color" ] && [ -n "$$TMUX" ]; then
+	#if [ "$$TERM" = "screen-256color" ] && [ -n "$$TMUX" ]; then
 		# TODO: -h split option
-		tmux='tmux split-window'
-	fi
+	#	tmux='tmux split-window -h'
+	#fi
+	# Use Ctrl-q x to kill qemu session from echr 17
 	eval $$tmux qemu-system-x86_64 \
 		-s \
 		-enable-kvm \
 		-m 128 \
 		-nographic \
+		-echr 17 \
 		-kernel linux/arch/$(ARCH)/boot/bzImage \
 		-initrd initramfs.gz \
 		-serial mon:stdio \
@@ -195,6 +205,7 @@ qemugdb: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
 		-enable-kvm \
 		-m 128 \
 		-nographic \
+		-echr 17 \
 		-kernel linux/arch/$(ARCH)/boot/bzImage \
 		-initrd initramfs.gz \
 		-serial mon:stdio \
