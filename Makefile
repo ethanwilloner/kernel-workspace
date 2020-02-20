@@ -57,17 +57,12 @@ kernel_randomization_disable: linux/.config
 kernel_randomization_disable_clean: linux/.config
 	(cd linux && scripts/config -e RANDOMIZE_BASE -e RANDOMIZE_MEMORY)
 
+#TODO: test CONFIG_UNWINDER_FRAME_POINTER
 kernel_debug: linux/.config
-	(cd linux && scripts/config -e DEBUG_INFO -e GDB_SCRIPTS)
+	(cd linux && scripts/config -e DEBUG_INFO -e GDB_SCRIPTS -e KGDB -e KGDB_SERIAL_CONSOLE -e KGDB_KDB)
 
 kernel_debug_clean: linux/.config
-	(cd linux && scripts/config -d DEBUG_INFO -d GDB_SCRIPTS)
-
-kernel_kgdb: linux/.config
-	(cd linux && scripts/config -e KGDB -e KGDB_SERIAL_CONSOLE -e KGDB_KDB)
-
-kernel_kgdb_clean: linux/.config
-	(cd linux && scripts/config -d KGDB -d KGDB_SERIAL_CONSOLE -d KGDB_KDB)
+	(cd linux && scripts/config -d DEBUG_INFO -d GDB_SCRIPTS -d KGDB -d KGDB_SERIAL_CONSOLE -d KGDB_KDB)
 
 kernel_bzImage: linux/.config
 	$(MAKE) -C linux bzImage
@@ -126,7 +121,7 @@ busybox_clean:
 	make -C busybox clean
 
 #### Initramfs
-.PHONY:
+.PHONY: initramfs/ 
 
 initramfs/:
 	mkdir -p initramfs/{bin,sbin,usr/bin,usr/sbin,etc,proc,sys}
@@ -149,10 +144,13 @@ initramfs/init: initramfs/
 	EOF
 	chmod +x initramfs/init
 
-initramfs/main:
-	gcc -static -o initramfs/main main.c
+main: main.c
+	gcc -static -o main main.c
 
-initramfs.gz: driver/$(DRIVER).ko
+initramfs/main: main
+	cp main initramfs/main
+
+initramfs.gz: driver/$(DRIVER).ko initramfs/init initramfs/main
 	cd initramfs
 	find . | cpio -oHnewc | gzip > ../initramfs.gz
 
@@ -188,18 +186,22 @@ qemurun: initramfs.gz
 		-append $(KERNEL_PARAMS) 
 
 .ONESHELL:
-gdb: qemurun
-	gdb \
-    -ex "add-auto-load-safe-path $(pwd)" \
-    -ex "file vmlinux" \
-    -ex 'target remote localhost:1234' \
-
 qemugdb: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
 	tmux=''
 	if [ "$$TERM" = "screen-256color" ] && [ -n "$$TMUX" ]; then
 		# TODO: -h split option
 		tmux='tmux split-window'
 	fi
+	# Idea taken from ciro, not functional now but will work once I
+	# break these shells out into proper bash scripts instead of makefile hacks
+	if [ "$#" -gt 0 ]; then
+	  brk="-ex 'break $1'"
+	else
+	  brk=""
+	fi
+	# symlink needed because gdb won't find vmlinux-gdb.py without it.
+	# I nearly threw my computer out the window while debugging this...
+	ln -s $(shell pwd)/linux/scripts/gdb/vmlinux-gdb.py linux/.
 	eval $$tmux qemu-system-x86_64 \
 		-s -S \
 		-enable-kvm \
@@ -211,10 +213,13 @@ qemugdb: linux/arch/$(ARCH)/boot/bzImage initramfs.gz
 		-serial mon:stdio \
 		-append $(KERNEL_PARAMS)
 	gdb \
-    -ex "add-auto-load-safe-path $(pwd)" \
-    -ex "file vmlinux" \
-    -ex 'set arch i386:x86-64:intel' \
-    -ex 'break start_kernel' \
-    -ex 'continue' \
-    -ex 'disconnect' \
-    -ex 'target remote localhost:1234'
+    -ex "add-auto-load-safe-path $(shell pwd)/linux" \
+    -ex "file $(shell pwd)/linux/vmlinux" \
+    -ex "set arch i386:x86-64:intel" \
+    -ex "target remote localhost:1234" \
+    -ex $$brk \
+	-ex 'continue' \
+	-ex 'disconnect' \
+	-ex 'set arch i386:x86-64' \
+	-ex 'target remote localhost:1234' \
+	-ex "lx-symbols driver/"
